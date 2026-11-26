@@ -1,6 +1,7 @@
 schema: 2
 id: rss
 name: RSS News
+icon: assets/icon.svg
 compose: compose.addon.yaml
 service: rss
 services: rss
