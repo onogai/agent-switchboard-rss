@@ -14,7 +14,8 @@ from .http import FetchError, HTTPError, UnsafeDestination, validate_url
 
 
 def is_google(url):
-    return urlsplit(url).hostname == "news.google.com"
+    host = urlsplit(url).hostname
+    return bool(host and host.rstrip(".") == "news.google.com")
 
 
 class GoogleResolver:
@@ -29,7 +30,7 @@ class GoogleResolver:
 
     async def _params(self, index, url):
         try:
-            validate_url(url)
+            url = validate_url(url)
             token = article_id(url)
             if not token or not re.fullmatch(r"[A-Za-z0-9_-]{1,4096}", token):
                 raise FetchError("Invalid Google News article link")
@@ -52,39 +53,65 @@ class GoogleResolver:
         pending = [value for value in params if not isinstance(value, str)]
         if not pending:
             return result
+        pairs, error = await self._decode(pending)
+        if error:
+            for index, *_ in pending:
+                result[int(index)] = (None, error)
+            return result
+
+        # Google sometimes omits the request ID. Never guess a multi-item
+        # mapping from order: retry only unresolved items as singleton RPCs.
+        unkeyed = any(key is None for key, _ in pairs)
+        retry = []
+        for item in pending:
+            index = item[0]
+            url = self._match(index, pairs, singleton=len(pending) == 1)
+            if url is None and unkeyed and len(pending) > 1:
+                retry.append(item)
+            elif url is not None:
+                result[int(index)] = self._validated(url)
+
+        async def resolve_one(item):
+            index = item[0]
+            pairs, error = await self._decode([item])
+            if error:
+                return index, (None, error)
+            url = self._match(index, pairs, singleton=True)
+            return index, self._validated(url) if url else (None, "Google URL unresolved")
+
+        for index, value in await asyncio.gather(*(resolve_one(item) for item in retry)):
+            result[int(index)] = value
+        return result
+
+    async def _decode(self, items):
         try:
             page = await self.http.fetch(
-                BATCHEXECUTE_URL, method="POST", data=build_batchexecute_body(pending),
+                BATCHEXECUTE_URL, method="POST", data=build_batchexecute_body(items),
                 headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
                 allowed_host="news.google.com",
             )
-            pairs = parse_batchexecute(page.body.decode("utf-8", errors="replace"))
-            # Never assign a partial or reordered unidentified response to the
-            # wrong article. One pending request is unambiguous.
-            by_id = {}
-            ambiguous = set()
-            for key, url in pairs:
-                if key is not None:
-                    if key in by_id and by_id[key] != url:
-                        ambiguous.add(key)
-                    by_id[key] = url
-            for index, *_ in pending:
-                url = by_id.get(index)
-                if url is None and len(pending) == len(pairs) == 1:
-                    url = pairs[0][1]
-                if not url or index in ambiguous:
-                    continue
-                try:
-                    validate_url(url)
-                    if is_google(url):
-                        raise UnsafeDestination("Google returned an unresolved link")
-                    result[int(index)] = (url, None)
-                except (FetchError, ValueError):
-                    result[int(index)] = (None, "Invalid decoded publisher URL")
+            return parse_batchexecute(page.body.decode("utf-8", errors="replace")), None
         except (FetchError, ValueError, TypeError, IndexError, KeyError) as exc:
-            for index, *_ in pending:
-                result[int(index)] = (None, "Google URL resolution failed: " + str(exc)[:200])
-        return result
+            return [], "Google URL resolution failed: " + str(exc)[:200]
+
+    @staticmethod
+    def _match(index, pairs, *, singleton=False):
+        matches = {url for key, url in pairs if key == index and isinstance(url, str)}
+        if len(matches) == 1:
+            return matches.pop()
+        if not matches and singleton and len(pairs) == 1 and pairs[0][0] is None:
+            return pairs[0][1]
+        return None
+
+    @staticmethod
+    def _validated(url):
+        try:
+            url = validate_url(url)
+            if is_google(url):
+                raise UnsafeDestination("Google returned an unresolved link")
+            return url, None
+        except (FetchError, ValueError):
+            return None, "Invalid decoded publisher URL"
 
 
 def extract_article(page):
@@ -118,6 +145,9 @@ class ArticleReader:
             raise ValueError("Invalid article text budget")
         items = []
         for article in ids:
+            if type(article) is not int or not 1 <= article <= 2**63 - 1:
+                items.append({"id": article, "error": "Invalid article ID"})
+                continue
             record = await asyncio.to_thread(self.store.article, article)
             if record is None:
                 items.append({"id": article, "error": "Unknown or expired article ID"})
@@ -133,7 +163,7 @@ class ArticleReader:
             if "error" in item:
                 continue
             try:
-                validate_url(item["url"])
+                item["url"] = validate_url(item["url"])
                 if is_google(item["url"]):
                     pending.setdefault(item["url"], []).append(i)
             except (FetchError, ValueError) as exc:

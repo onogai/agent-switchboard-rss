@@ -1,0 +1,78 @@
+name: Container smoke
+on: [push, pull_request]
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start private Compose service and exercise real MCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOST_UID="$(id -u)" HOST_GID="$(id -g)"
+          export SWITCHBOARD_ADDON_INSTANCE=rss-ci
+          export SWITCHBOARD_ADDONS_NETWORK=rss-ci-net
+          export SWITCHBOARD_ADDON_STATE="$RUNNER_TEMP/rss-state"
+          mkdir -p "$SWITCHBOARD_ADDON_STATE"/{data,secrets}
+          umask 077
+          python -c 'import secrets; print(secrets.token_urlsafe(48))' > "$SWITCHBOARD_ADDON_STATE/secrets/mcptoken"
+          docker network create "$SWITCHBOARD_ADDONS_NETWORK"
+          cleanup() {
+            docker compose -f compose.addon.yaml logs --no-color
+            docker compose -f compose.addon.yaml down
+            docker network rm "$SWITCHBOARD_ADDONS_NETWORK"
+          }
+          trap cleanup EXIT
+          docker compose -f compose.addon.yaml config --quiet
+          docker compose -f compose.addon.yaml up -d --build --wait --wait-timeout 90
+          docker compose -f compose.addon.yaml exec -T rss python - <<'PY'
+          import asyncio
+          import json
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
+          from fastmcp import Client
+          from fastmcp.client.transports import StreamableHttpTransport
+
+          endpoint = "http://127.0.0.1:8775/mcp"
+          token = Path("/run/secrets/rss-mcp-token").read_text().strip()
+          request = {"jsonrpc":"2.0","id":1,"method":"initialize",
+                     "params":{"protocolVersion":"2025-06-18","capabilities":{},
+                               "clientInfo":{"name":"smoke","version":"1"}}}
+          for authorization in (None, "Bearer invalid"):
+              headers = {"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+              if authorization:
+                  headers["Authorization"] = authorization
+              try:
+                  urlopen(Request(endpoint, data=json.dumps(request).encode(), headers=headers), timeout=5)
+              except HTTPError as exc:
+                  assert exc.code == 401, exc.code
+              else:
+                  raise AssertionError("Unauthenticated request accepted")
+
+          async def check():
+              async with Client(StreamableHttpTransport(endpoint, headers={"Authorization":"Bearer "+token})) as client:
+                  assert len(await client.list_tools()) == 7
+                  await client.call_tool("manage_sources", {"action":"upsert","source_id":"ci","kind":"rss",
+                                                           "url":"https://example.com/feed"})
+                  result = await client.call_tool("list_sources", {})
+                  assert result.structured_content["sources"][0]["id"] == "ci"
+          asyncio.run(check())
+          PY
+          docker compose -f compose.addon.yaml restart rss
+          docker compose -f compose.addon.yaml up -d --wait --wait-timeout 90
+          docker compose -f compose.addon.yaml exec -T rss python - <<'PY'
+          import asyncio
+          from pathlib import Path
+          from fastmcp import Client
+          from fastmcp.client.transports import StreamableHttpTransport
+          async def check():
+              token = Path("/run/secrets/rss-mcp-token").read_text().strip()
+              transport = StreamableHttpTransport("http://127.0.0.1:8775/mcp",
+                                                   headers={"Authorization":"Bearer "+token})
+              async with Client(transport) as client:
+                  data = (await client.call_tool("list_sources", {})).structured_content
+                  assert data["sources"][0]["id"] == "ci"
+          asyncio.run(check())
+          PY
