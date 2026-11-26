@@ -16,9 +16,9 @@ See [Requirements](REQUIREMENTS.md) and [Architecture](ARCHITECTURE.md).
 
 ## Status
 
-Initial SQLite catalog and checkpoint implementation. The network layer, MCP tools, packaging and live validation are not implemented yet.
+Initial SQLite catalog, checkpoints, Google News/RSS collection and compact normalization. Article reading, retention, MCP tools, packaging and live validation are not implemented yet.
 
-Run storage tests: `python -m unittest discover -s tests -v`.
+Install dependencies with `python -m pip install -r requirements.txt`; run tests with `python -m unittest discover -s tests -v`.
 
 ## References
 
