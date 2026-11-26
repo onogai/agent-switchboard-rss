@@ -90,7 +90,7 @@ class ParsedFeed:
 
 
 def parse_feed(body, base_url, *, kind, name, max_entries=2000):
-    parsed = feedparser.parse(body, response_headers={"content-location": base_url})
+    parsed = feedparser.parse(body, response_headers={"content-location": base_url, "content-type": "application/xml"})
     if not parsed.version or (parsed.bozo and not parsed.entries):
         raise FeedError("Invalid RSS/Atom feed")
     if len(parsed.entries) > max_entries:
