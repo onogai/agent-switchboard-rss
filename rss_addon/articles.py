@@ -13,6 +13,11 @@ from trafilatura import bare_extraction
 from .http import FetchError, HTTPError, UnsafeDestination, validate_url
 
 
+# Google News in the EU requires a consent preference. Use the minimal
+# cookie confirmed on the deployment host; never send it to publishers.
+_GOOGLE_CONSENT_COOKIE = "SOCS=CAI"
+
+
 def is_google(url):
     host = urlsplit(url).hostname
     return bool(host and host.rstrip(".") == "news.google.com")
@@ -35,6 +40,7 @@ class GoogleResolver:
             if not token or not re.fullmatch(r"[A-Za-z0-9_-]{1,4096}", token):
                 raise FetchError("Invalid Google News article link")
             page = await self.http.fetch(params_page_url(token, url),
+                                         headers={"Cookie": _GOOGLE_CONSENT_COOKIE},
                                          allowed_host="news.google.com")
             signature = parse_signature(page.body.decode("utf-8", errors="replace"))
             if not signature:
@@ -87,7 +93,8 @@ class GoogleResolver:
         try:
             page = await self.http.fetch(
                 BATCHEXECUTE_URL, method="POST", data=build_batchexecute_body(items),
-                headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                         "Cookie": _GOOGLE_CONSENT_COOKIE},
                 allowed_host="news.google.com",
             )
             return parse_batchexecute(page.body.decode("utf-8", errors="replace")), None

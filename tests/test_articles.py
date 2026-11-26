@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from rss_addon.articles import ArticleReader, GoogleResolver, extract_article
-from rss_addon.http import HTTPError, Page
+from rss_addon.http import HTTPError, Page, UnsafeDestination
 from rss_addon.store import Article, Store
 
 
@@ -29,6 +29,12 @@ class ArticleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_decode_lazily_and_cache(self):
         async def fetch(url, **kwargs):
+            if "news.google.com" in url:
+                self.assertEqual("news.google.com", kwargs["allowed_host"])
+                if kwargs.get("headers", {}).get("Cookie") != "SOCS=CAI":
+                    raise UnsafeDestination("Unexpected redirect destination")
+            else:
+                self.assertNotIn("Cookie", kwargs.get("headers", {}))
             if "batchexecute" in url:
                 self.assertEqual("POST", kwargs["method"])
                 self.assertEqual("news.google.com", kwargs["allowed_host"])
