@@ -106,7 +106,7 @@ def parse_feed(body, base_url, *, kind, name, max_entries=2000):
             skipped += 1
             continue
         try:
-            validate_url(url)
+            url = validate_url(url)
         except UnsafeDestination:
             skipped += 1
             continue

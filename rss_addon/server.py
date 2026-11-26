@@ -83,13 +83,13 @@ def _decode_page(token, sources):
         if len(token) > 8192:
             raise ValueError
         data = json.loads(base64.b64decode(token, altchars=b"-_", validate=True))
-        if set(data) != {"scope", "streams", "since", "after", "until"}:
+        if set(data) != {"scope", "streams", "since", "after", "until", "generation"}:
             raise ValueError
         if data["scope"] != _scope(sources):
             raise ValueError
         if not isinstance(data["streams"], list) or not set(data["streams"]) <= {s["stream"] for s in sources}:
             raise ValueError
-        if any(type(data[k]) is not int for k in ("since", "after", "until")):
+        if any(type(data[k]) is not int for k in ("since", "after", "until", "generation")):
             raise ValueError
         if not 0 <= data["after"] <= data["until"]:
             raise ValueError
@@ -112,12 +112,13 @@ class RSSService:
             self.store._key(checkpoint)
         if page and checkpoint is not None:
             raise ValueError("Acknowledge checkpoint batches instead of using page cursors")
+        await asyncio.to_thread(self.store.prune)
         if page:
             position = _decode_page(page, sources)
             active = [s for s in sources if s["stream"] in position["streams"]]
             data = await self.collector.headlines(
                 active, refresh_sources=False, since=position["since"], after=position["after"],
-                until=position["until"], limit=limit, include_description=description,
+                until=position["until"], generation=position["generation"], limit=limit, include_description=description,
                 include_timestamp=timestamp,
             )
         else:
@@ -127,10 +128,17 @@ class RSSService:
                 include_description=description, include_timestamp=timestamp,
             )
         if "next_after" in data:
-            position.update(after=data.pop("next_after"), until=data.pop("until"))
+            position.update(after=data.pop("next_after"), until=data.pop("until"),
+                            generation=data.pop("generation"))
             if "page_streams" in data:
                 position["streams"] = data.pop("page_streams")
             data["next_page"] = _encode_page(position)
+        expired = data.pop("expired_streams", [])
+        if expired:
+            errors = data.setdefault("errors", {})
+            for source in sources:
+                if source["stream"] in expired:
+                    errors[source["id"]] = "Checkpoint expired; resynchronize with a new checkpoint name"
         if data.get("batch_id") is None:
             data.pop("batch_id", None)
         return data
@@ -177,7 +185,7 @@ def make_server(store: Store, *, auth=None, http=None):
         """Fetch named sources/groups. Rows: [article ID, title, optional description, optional UTC epoch time].
         With checkpoint, acknowledge batch_id only after handling; repeat until has_more is false.
         Without checkpoint, use next_page with the same sources/groups. since sets the initial lookback.
-        Errors are source-specific; failed sources are not acknowledged. No article bodies or URLs."""
+        Errors are source-specific; failed sources are not acknowledged. Expired checkpoint: use a new name and lookback. No article bodies or URLs."""
         selected = await asyncio.to_thread(store.select_sources, sources, groups)
         return await service.headlines(selected, since=since, checkpoint=checkpoint, limit=limit,
                                        description=include_description, timestamp=include_timestamp, page=page)
@@ -204,6 +212,7 @@ def make_server(store: Store, *, auth=None, http=None):
     ) -> dict:
         """Read only selected articles by short ID or public URL (up to 20).
         Resolve Google links lazily. Return clean text, publisher URL, errors and truncation."""
+        await asyncio.to_thread(store.prune)
         return await service.reader.read(ids, urls, max_chars_per_article=max_chars_per_article,
                                          max_total_chars=max_total_chars)
 
@@ -289,7 +298,8 @@ def main():
     if host != "127.0.0.1" and not token_file:
         raise ValueError("Network-reachable MCP requires RSS_MCP_TOKEN_FILE")
     auth = PrivateBearerVerifier(Path(token_file)) if token_file else None
-    store = Store(os.environ.get("RSS_DB", "rss.sqlite3"))
+    store = Store(os.environ.get("RSS_DB", "rss.sqlite3"),
+                  retention_days=int(os.environ.get("RSS_RETENTION_DAYS", "30")))
     make_server(store, auth=auth).run(transport="http", host=host,
                                     port=int(os.environ.get("RSS_PORT", "8775")), path="/mcp")
 

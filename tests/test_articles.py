@@ -72,6 +72,36 @@ class ArticleTests(unittest.IsolatedAsyncioTestCase):
                          await GoogleResolver(self.http).resolve([GOOGLE, second]))
         self.assertEqual(3, self.http.fetch.await_count)
 
+    async def test_unkeyed_batch_falls_back_to_singletons(self):
+        second = "https://news.google.com/rss/articles/second"
+        responses = [
+            Page(GOOGLE, PARAMS), Page(second, PARAMS),
+            Page(GOOGLE, json.dumps([
+                ["wrb.fr", "Fbv4je", json.dumps(["garturlres", "https://example.com/b"])],
+                ["wrb.fr", "Fbv4je", json.dumps(["garturlres", PUBLISHER])],
+            ]).encode()),
+            Page(GOOGLE, decoded(PUBLISHER, None)),
+            Page(GOOGLE, decoded("https://example.com/b", None)),
+        ]
+        self.http.fetch.side_effect = responses
+        self.assertEqual([(PUBLISHER, None), ("https://example.com/b", None)],
+                         await GoogleResolver(self.http).resolve([GOOGLE, second]))
+        self.assertEqual(5, self.http.fetch.await_count)
+
+    async def test_wrong_response_id_is_not_assigned(self):
+        self.http.fetch.side_effect = [Page(GOOGLE, PARAMS), Page(GOOGLE, decoded(PUBLISHER, "9"))]
+        result = (await ArticleReader(self.store, self.http).read(ids=[1]))["articles"][0]
+        self.assertIn("error", result)
+        self.assertIsNone(self.store.article(1)["resolved_url"])
+        self.assertEqual(2, self.http.fetch.await_count)
+
+    async def test_invalid_id_does_not_abort_batch(self):
+        self.http.fetch.return_value = Page(PUBLISHER, b"body")
+        reader = ArticleReader(self.store, self.http, extractor=lambda page: {"text": "text"})
+        result = (await reader.read(ids=[2**64], urls=[PUBLISHER]))["articles"]
+        self.assertIn("error", result[0])
+        self.assertEqual("text", result[1]["text"])
+
     async def test_limits_and_partial_errors(self):
         async def fetch(url, **kwargs):
             if url.endswith("/blocked"):

@@ -73,7 +73,8 @@ class NormalizationTests(unittest.TestCase):
         for url in ("http://127.0.0.1/x", "http://[::1]/", "http://10.0.0.1",
                     "http://169.254.169.254", "http://[::ffff:192.168.0.1]/",
                     "http://localhost.", "http://x.local", "file:///tmp/file",
-                    "http://user@example.com", "http://example.com:8080"):
+                    "http://user@example.com", "http://example.com:8080",
+                    "http://１２７.０.０.１/", "http://127。0。0。1/"):
             with self.subTest(url=url), self.assertRaises(UnsafeDestination):
                 validate_url(url)
         self.assertEqual("https://example.com/feed", validate_url("https://example.com/feed"))

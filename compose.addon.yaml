@@ -1,0 +1,39 @@
+services:
+  rss:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    user: "${HOST_UID:?}:${HOST_GID:?}"
+    environment:
+      HOME: /tmp
+      RSS_BIND_HOST: "0.0.0.0"
+      RSS_PORT: "8775"
+      RSS_DB: /data/rss.sqlite3
+      RSS_MCP_TOKEN_FILE: /run/secrets/rss-mcp-token
+      RSS_RETENTION_DAYS: "30"
+    volumes:
+      - type: bind
+        source: "${SWITCHBOARD_ADDON_STATE:?}/data"
+        target: /data
+      - type: bind
+        source: "${SWITCHBOARD_ADDON_STATE:?}/secrets/mcptoken"
+        target: /run/secrets/rss-mcp-token
+        read_only: true
+    networks:
+      addons:
+        aliases: ["addon-${SWITCHBOARD_ADDON_INSTANCE}"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8775/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+networks:
+  addons:
+    external: true
+    name: "${SWITCHBOARD_ADDONS_NETWORK:?}"

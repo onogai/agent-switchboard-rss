@@ -22,8 +22,11 @@ class Article:
 
 
 class Store:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, retention_days=30):
+        if not 1 <= retention_days <= 365:
+            raise ValueError("Retention must be 1-365 days")
         self.path = str(path)
+        self.retention_seconds = retention_days * 86400
         with self._db(write=True) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS sources (
@@ -49,21 +52,35 @@ class Store:
                 CREATE TABLE IF NOT EXISTS observations (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     stream TEXT NOT NULL, article_id INTEGER NOT NULL REFERENCES articles(id),
-                    observed INTEGER NOT NULL, UNIQUE(stream, article_id)
+                    observed INTEGER NOT NULL, last_seen INTEGER NOT NULL, UNIQUE(stream, article_id)
                 );
                 CREATE INDEX IF NOT EXISTS observations_stream_seq
                     ON observations(stream, seq);
+                CREATE INDEX IF NOT EXISTS observations_article ON observations(article_id);
                 CREATE TABLE IF NOT EXISTS checkpoints (
                     name TEXT NOT NULL, stream TEXT NOT NULL,
                     last_seq INTEGER NOT NULL DEFAULT 0,
                     initial_until INTEGER NOT NULL, initial_since INTEGER NOT NULL,
+                    expired INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(name, stream)
                 );
                 CREATE TABLE IF NOT EXISTS batches (
                     id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL,
                     positions TEXT NOT NULL, created INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS maintenance (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    last_prune INTEGER NOT NULL, generation INTEGER NOT NULL
+                );
+                INSERT OR IGNORE INTO maintenance VALUES (1,0,0);
             """)
+            # Upgrade development databases created by earlier versions.
+            if "last_seen" not in {r[1] for r in db.execute("PRAGMA table_info(observations)")}:
+                db.execute("ALTER TABLE observations ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0")
+                db.execute("UPDATE observations SET last_seen=observed")
+            if "expired" not in {r[1] for r in db.execute("PRAGMA table_info(checkpoints)")}:
+                db.execute("ALTER TABLE checkpoints ADD COLUMN expired INTEGER NOT NULL DEFAULT 0")
+            db.execute("CREATE INDEX IF NOT EXISTS observations_seen ON observations(last_seen)")
 
     @contextmanager
     def _db(self, *, write=False):
@@ -71,8 +88,7 @@ class Store:
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA foreign_keys=ON")
-            if write:
-                db.execute("BEGIN IMMEDIATE")
+            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield db
             db.commit()
         except BaseException:
@@ -182,11 +198,13 @@ class Store:
                     description=COALESCE(excluded.description,articles.description)""",
                     (entry.identity, entry.title, entry.publisher, entry.url, entry.published, entry.description))
                 article_id = db.execute("SELECT id FROM articles WHERE identity=?", (entry.identity,)).fetchone()[0]
-                db.execute("""INSERT OR IGNORE INTO observations(stream,article_id,observed)
-                    VALUES (?,?,?)""", (stream, article_id, observed))
+                db.execute("""INSERT INTO observations(stream,article_id,observed,last_seen)
+                    VALUES (?,?,?,?) ON CONFLICT(stream,article_id) DO UPDATE SET
+                    last_seen=MAX(observations.last_seen,excluded.last_seen)""",
+                    (stream, article_id, observed, observed))
 
     def headlines(self, streams, *, since, checkpoint=None, limit=100,
-                  include_description=False, include_timestamp=False, after=0, until=None):
+                  include_description=False, include_timestamp=False, after=0, until=None, generation=None):
         """Return an observation prefix; never acknowledge on read.
 
         since is an epoch-second bootstrap cutoff (publication, falling back
@@ -202,6 +220,10 @@ class Store:
         if checkpoint is not None and (after or until is not None):
             raise ValueError("Checkpoint reads do not use page cursors")
         with self._db(write=checkpoint is not None) as db:
+            current_generation = db.execute("SELECT generation FROM maintenance WHERE id=1").fetchone()[0]
+            if generation is not None and generation != current_generation:
+                raise ValueError("Page expired after history cleanup; restart the read")
+            expired_streams = []
             if checkpoint is None and until is None:
                 until = db.execute("SELECT COALESCE(MAX(seq),0) FROM observations").fetchone()[0]
             rows = []
@@ -213,6 +235,9 @@ class Store:
                         VALUES (?,?,?,?)""", (checkpoint, stream, high, since))
                     cp = db.execute("SELECT * FROM checkpoints WHERE name=? AND stream=?",
                                     (checkpoint, stream)).fetchone()
+                    if cp["expired"]:
+                        expired_streams.append(stream)
+                        continue
                     condition = "o.seq>? AND (o.seq>? OR COALESCE(a.published,o.observed)>=?)"
                     args = (cp["last_seq"], cp["initial_until"], cp["initial_since"])
                 else:
@@ -249,7 +274,10 @@ class Store:
                 db.execute("INSERT INTO batches VALUES (?,?,?,?)",
                            (batch_id, checkpoint, json.dumps(positions), int(time.time())))
             result = {"sources": publishers, "count": len(seen), "has_more": more, "batch_id": batch_id}
+            if expired_streams:
+                result["expired_streams"] = expired_streams
             if checkpoint is None and more:
+                result["generation"] = current_generation
                 result["next_after"] = max(positions.values())
                 result["until"] = until
             return result
@@ -260,10 +288,48 @@ class Store:
             batch = db.execute("SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
             if batch is None:
                 raise ValueError("Unknown or expired batch")
-            for stream, seq in json.loads(batch["positions"]).items():
+            positions = json.loads(batch["positions"])
+            # Never acknowledge an expired checkpoint, even with an old batch.
+            for stream in positions:
+                cp = db.execute("SELECT expired FROM checkpoints WHERE name=? AND stream=?",
+                                (batch["checkpoint"], stream)).fetchone()
+                if cp is None or cp["expired"]:
+                    raise ValueError("Checkpoint expired; use a new checkpoint name")
+            for stream, seq in positions.items():
                 db.execute("""UPDATE checkpoints SET last_seq=MAX(last_seq,?)
                     WHERE name=? AND stream=?""", (seq, batch["checkpoint"], stream))
         return {"acknowledged": True}
+
+    def prune(self, *, now=None, force=False):
+        """Prune at most hourly, on demand. Keep entries still present in feeds.
+
+        Explicitly mark checkpoints that lost eligible, unacknowledged rows.
+        Do not silently reset their state. A new checkpoint name resynchronizes.
+        """
+        now = int(time.time()) if now is None else now
+        cutoff = now - self.retention_seconds
+        with self._db(write=True) as db:
+            last = db.execute("SELECT last_prune FROM maintenance WHERE id=1").fetchone()[0]
+            if not force and last and now - last < 3600:
+                return {"pruned": False}
+            db.execute("""UPDATE checkpoints AS c SET expired=1
+                WHERE expired=0 AND EXISTS (
+                    SELECT 1 FROM observations o JOIN articles a ON a.id=o.article_id
+                    WHERE o.stream=c.stream AND o.last_seen<?
+                      AND o.seq>c.last_seq
+                      AND (o.seq>c.initial_until OR COALESCE(a.published,o.observed)>=c.initial_since)
+                )""", (cutoff,))
+            removed = db.execute("DELETE FROM observations WHERE last_seen<?", (cutoff,)).rowcount
+            articles = db.execute("""DELETE FROM articles WHERE NOT EXISTS
+                (SELECT 1 FROM observations WHERE article_id=articles.id)""").rowcount
+            batches = db.execute("DELETE FROM batches WHERE created<?", (cutoff,)).rowcount
+            # A deleted/reconfigured source never reuses its old stream ID.
+            db.execute("""DELETE FROM checkpoints WHERE NOT EXISTS
+                (SELECT 1 FROM sources WHERE stream=checkpoints.stream)
+                AND NOT EXISTS (SELECT 1 FROM observations WHERE stream=checkpoints.stream)""")
+            db.execute("UPDATE maintenance SET last_prune=?, generation=generation+? WHERE id=1",
+                       (now, int(removed > 0)))
+            return {"pruned": True, "observations": removed, "articles": articles, "batches": batches}
 
     def article(self, article_id):
         with self._db() as db:

@@ -5,6 +5,8 @@ import ipaddress
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 
+from yarl import URL
+
 import aiohttp
 from aiohttp.resolver import ThreadedResolver
 
@@ -36,16 +38,19 @@ def validate_url(url):
     if any(c.isspace() or ord(c) < 32 or c == "\\" for c in url):
         raise UnsafeDestination("Invalid URL characters")
     try:
-        parsed = urlsplit(url)
-        host = parsed.hostname
+        # Validate the same canonical representation aiohttp connects to.
+        parsed = URL(url)
+        host = parsed.raw_host
         port = parsed.port
     except ValueError as exc:
         raise UnsafeDestination("Invalid URL") from exc
     if (parsed.scheme not in ("http", "https") or not host or
-            parsed.username is not None or parsed.password is not None or
+            parsed.user is not None or parsed.password is not None or
             port not in (None, 80, 443)):
         raise UnsafeDestination("Expected public HTTP(S) URL on port 80 or 443")
     host = host.lower().rstrip(".")
+    if "%" in host:
+        raise UnsafeDestination("Invalid host")
     if host == "localhost" or host.endswith((".localhost", ".local")):
         raise UnsafeDestination("Local destination")
     try:
@@ -53,7 +58,7 @@ def validate_url(url):
             raise UnsafeDestination("Non-public IP address")
     except ValueError:
         pass
-    return url
+    return str(parsed)
 
 
 class PublicResolver(ThreadedResolver):
@@ -106,7 +111,7 @@ class HTTPClient:
 
     async def fetch(self, url, *, max_bytes=None, method="GET", data=None, headers=None,
                     allowed_host=None):
-        validate_url(url)
+        url = validate_url(url)
         if self._session is None:
             raise RuntimeError("HTTPClient must be opened first")
         budget = self.max_bytes if max_bytes is None else max_bytes
@@ -132,7 +137,7 @@ class HTTPClient:
 
     async def _download(self, url, budget, method, data, headers, allowed_host):
         for hop in range(self.max_redirects + 1):
-            validate_url(url)
+            url = validate_url(url)
             if allowed_host is not None and (urlsplit(url).hostname != allowed_host
                                              or urlsplit(url).scheme != "https"):
                 raise UnsafeDestination("Unexpected redirect destination")
