@@ -25,7 +25,7 @@ Named sources and group memberships are persisted. Sources have an internal stre
 
 Each named checkpoint tracks observation sequence per stream, not publication time or global article ID. On first use, capture an initial publication/observation lookback and observation watermark. Later observations are eligible even when published before that window. Read pages in observation order; acknowledge only the prefix represented by a batch. Acknowledgements are monotonic and idempotent, including overlapping reads. Unacknowledged entries may be repeated. A newly added source starts independently. Same article can appear again in another page/stream; deduplicate within a page, not semantically.
 
-Prune old history with explicit checkpoint-expiry behavior before production. Cache resolved URLs; do not cache full article bodies without a measured need. Keep checkpoint names independent of task IDs and rule IDs. No implicit acknowledgement and no separate consumer registry.
+Prune observations not seen for the retention period (default 30 days) and orphan articles, old batches and obsolete stream checkpoints. Cleanup is on demand, at most hourly. Mark affected checkpoints expired; resynchronize with a new name. Invalidate stateless page cursors when cleanup deletes observations. Cache resolved URLs; do not cache full article bodies without a measured need. Keep checkpoint names independent of task IDs and rule IDs. No implicit acknowledgement and no separate consumer registry.
 
 ## Fetching and deployment
 
@@ -33,4 +33,4 @@ Use FastMCP, bounded asynchronous HTTP, feedparser, a maintained Google URL deco
 
 Follow the current [Switchboard add-on contract](https://github.com/onogai/agent-switchboard/blob/main/ADDONS.md): private Compose service, installer-owned data and credentials, Bearer-authenticated MCP, health endpoint and standard discovery. No host ports or custom installer logic.
 
-Keep code and documentation minimal; review regularly. Retention policy, network limits and final schemas remain implementation decisions.
+Keep code and documentation minimal; review regularly. Review network limits, payload sizes and live extraction reliability before production.
