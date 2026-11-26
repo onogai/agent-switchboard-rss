@@ -186,7 +186,7 @@ class Store:
                     VALUES (?,?,?)""", (stream, article_id, observed))
 
     def headlines(self, streams, *, since, checkpoint=None, limit=100,
-                  include_description=False, include_timestamp=False):
+                  include_description=False, include_timestamp=False, after=0, until=None):
         """Return an observation prefix; never acknowledge on read.
 
         since is an epoch-second bootstrap cutoff (publication, falling back
@@ -199,7 +199,11 @@ class Store:
             raise ValueError("Invalid headline limit")
         if checkpoint is not None:
             self._key(checkpoint)
+        if checkpoint is not None and (after or until is not None):
+            raise ValueError("Checkpoint reads do not use page cursors")
         with self._db(write=checkpoint is not None) as db:
+            if checkpoint is None and until is None:
+                until = db.execute("SELECT COALESCE(MAX(seq),0) FROM observations").fetchone()[0]
             rows = []
             for stream in streams:
                 if checkpoint is not None:
@@ -212,8 +216,8 @@ class Store:
                     condition = "o.seq>? AND (o.seq>? OR COALESCE(a.published,o.observed)>=?)"
                     args = (cp["last_seq"], cp["initial_until"], cp["initial_since"])
                 else:
-                    condition = "COALESCE(a.published,o.observed)>=?"
-                    args = (since,)
+                    condition = "COALESCE(a.published,o.observed)>=? AND o.seq>? AND o.seq<=?"
+                    args = (since, after, until)
                 # Each stream needs at most limit+1 observations to establish
                 # a global prefix; identity is unique within each stream.
                 rows.extend(db.execute(f"""SELECT a.*,o.seq,o.stream FROM observations o
@@ -244,7 +248,11 @@ class Store:
                 batch_id = uuid.uuid4().hex
                 db.execute("INSERT INTO batches VALUES (?,?,?,?)",
                            (batch_id, checkpoint, json.dumps(positions), int(time.time())))
-            return {"sources": publishers, "count": len(seen), "has_more": more, "batch_id": batch_id}
+            result = {"sources": publishers, "count": len(seen), "has_more": more, "batch_id": batch_id}
+            if checkpoint is None and more:
+                result["next_after"] = max(positions.values())
+                result["until"] = until
+            return result
 
     def acknowledge(self, batch_id):
         """Advance only acknowledged positions. Repeated/stale acks are safe."""
