@@ -2,43 +2,28 @@
 
 ## Goal
 
-Make recurring news screening cheap and reliable for agents: scan headlines, select relevant articles, then read and verify only those articles. Support both breaking-news monitoring and broader digests without tying the add-on to particular news rules.
+Reduce the cost of recurring news screening. Agents receive compact new headlines, select relevant articles, and verify only selected material.
 
 ## MVP
 
-### Headline collection
-
-- Search Google News RSS using arbitrary queries (including publisher and time operators), language and region.
-- Read arbitrary RSS/Atom URLs. Batch independent searches or feeds into a single MCP call.
-- Parse and normalize in code. Default screening payload contains a stable short article ID and clean headline, grouped by source when useful. Include a short description only on request and only if it adds information; no HTML, redundant titles, URLs, images or verbose metadata by default. Publication timestamps may be requested.
-- Deduplicate identical articles across feeds and searches where reliable identifiers match. Do not attempt semantic event deduplication.
-- Support incremental reads by cursor; also allow an explicit initial time window. Distinguish publication time from first observation time. Late-discovered articles must not be lost merely because they were published earlier.
-- Independent callers and query scopes must not consume each other's results. Repeated calls with the same cursor are safe; do not advance a consumer's checkpoint implicitly.
-- Bound response sizes and expose continuation when results exceed the limit. Distinguish empty results, partial upstream failures, and expired cursors. Never silently advance past unseen results.
-
-### Article reading
-
-- Read a batch of article IDs or public HTTP(S) URLs. Resolve Google News links only when required for selected articles; reuse successful mappings.
-- Return clean readable text, title, publisher URL and useful available metadata. Report per-item errors, truncation, unresolved links and access blocks explicitly. Do not return raw HTML or try to bypass paywalls.
-- Support per-article and aggregate output limits, bounded parallelism, request timeouts and sensible retry/backoff.
-- Prevent requests to local/private network destinations, including redirects and DNS resolution. Bound downloaded content as well as returned content.
-
-### Deployment and operation
-
-- One container, embedded SQLite in installer-owned persistent state. No external database, separate worker, UI, or dedicated scheduler.
-- Standard Switchboard add-on manifest, private network, Streamable HTTP with Bearer authentication, health endpoint, and installer-managed secrets. No core changes or manual credential editing.
-- Persist article IDs, URL mappings and observation cursors across restarts. Keep bounded history with configurable retention; make expiration explicit.
-- Keep tool descriptions and outputs economical. No LLM calls inside the add-on.
-- Keep documentation minimal and review it regularly. Add features only for demonstrated use cases.
+- Manage named sources (Google News query with locale, or RSS/Atom URL) and flat groups through MCP. A source can belong to multiple groups. Enable/disable sources. No UI required.
+- List the catalog and read selected sources/groups in one call. Support ad hoc Google News search. Fetch on demand; do not require a subscription registry beyond the catalog or a separate scheduler.
+- Default results: short stable article IDs and clean titles grouped by publisher. Optional useful descriptions and publication times. No URLs, HTML, images or redundant metadata by default.
+- Deduplicate reliable article identities within a result; never merge different stories based solely on headline similarity. Cross-provider duplicates may remain until URL resolution.
+- Named checkpoints stored by the add-on, independent per source and checkpoint name. A read never acknowledges results automatically. Explicit acknowledgement after successful handling advances only the returned prefix, monotonically and idempotently. Interactive reads without checkpoints do not affect them. Late observations must remain eligible even if their publication time is older.
+- Initial lookback, bounded pages, explicit continuation, and explicit source failures (including partial failure and expired history). A failed source must not be mistaken for no news.
+- Read selected IDs or public HTTP(S) URLs in batches. Resolve Google links lazily; cache resolved URLs. Return clean text and publisher URLs, useful available metadata, and per-item errors/truncation. No raw HTML or paywall bypass.
+- Bound network concurrency, timeouts, retry/backoff, downloaded bytes and output size. Reject private/local destinations, including DNS and redirects.
+- Single private container, SQLite in installer-managed persistent state, bounded retention, Bearer-authenticated Streamable HTTP and health endpoint. Follow standard Switchboard add-on installation; no Core changes.
+- Keep documentation and tool contracts small. Administration tools are intended for the interactive profile via existing Gateway grants. No dependency on Task Queue identifiers or tracing.
 
 ## Acceptance
 
-- Live smoke test from the intended host: Google News search (including Reuters and multilingual queries), Google URL resolution, and extraction of representative accessible publisher articles. Report failure rates and access blocks, not just successful examples.
-- Fixture-based tests for normalization, deduplication, cursor isolation, late arrivals, pagination, retry safety, retention, partial failures and extraction limits.
-- Show that screening never resolves every Google URL or fetches article bodies, and does not include URLs by default.
-- Measure actual response bytes, estimated tokens, network calls and elapsed time for a representative screening run versus full metadata output.
-- Validate clean installation, persistence across restart and MCP discovery through the supported Switchboard installer; no production news rules changed until integration is verified.
+- Tests: catalog CRUD, grouping, source changes, stable IDs, deduplication, checkpoint isolation, first lookback, late arrivals, bounded pages, overlapping reads, repeated acknowledgements, retention and partial failures.
+- Live tests from intended host: Reuters and multilingual Google News searches, Google URL resolution and article extraction on representative publishers; report blocks and failures.
+- Compare payload bytes, estimated tokens and elapsed time against full-metadata screening. Verify no eager URL resolution or article fetching.
+- Validate installer, persistence, MCP discovery and grants before changing production news rules.
 
 ## Out of scope
 
-Persistent subscription management, background polling, notifications, news relevance scoring, semantic deduplication, full-text search, UI, and long-term article archiving. Task Queue owns scheduling and agents own editorial decisions. On-demand polling cannot guarantee discovery of every publication: RSS feeds are bounded and Google News is not exhaustive.
+Background polling, notifications, scoring, semantic event deduplication, full-text search, UI and long-term archiving. RSS and Google News are bounded and not exhaustive. Task Queue owns scheduling; agents own editorial decisions.
