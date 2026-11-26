@@ -169,7 +169,9 @@ class Collector:
         except (FetchError, FeedError, ValueError) as exc:
             return {"source": source_id, "error": str(exc)}
 
-    async def headlines(self, sources, **options):
+    async def headlines(self, sources, *, refresh_sources=True, **options):
+        if not refresh_sources:
+            return await asyncio.to_thread(self.store.headlines, [s["stream"] for s in sources], **options)
         refresh = await self.refresh(sources)
         successful = [result["stream"] for result in refresh if "stream" in result]
         data = await asyncio.to_thread(self.store.headlines, successful, **options)
@@ -179,4 +181,6 @@ class Collector:
             data["errors"] = errors
         if warnings:
             data["warnings"] = warnings
+        if data.get("has_more") and options.get("checkpoint") is None:
+            data["page_streams"] = successful
         return data
