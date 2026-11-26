@@ -104,7 +104,8 @@ class HTTPClient:
             await self._resolver.close()
             self._resolver = None
 
-    async def fetch(self, url, *, max_bytes=None):
+    async def fetch(self, url, *, max_bytes=None, method="GET", data=None, headers=None,
+                    allowed_host=None):
         validate_url(url)
         if self._session is None:
             raise RuntimeError("HTTPClient must be opened first")
@@ -116,7 +117,7 @@ class HTTPClient:
                 async with asyncio.timeout(self.timeout):
                     for attempt in range(self.retries + 1):
                         try:
-                            return await self._download(url, budget)
+                            return await self._download(url, budget, method, data, headers, allowed_host)
                         except HTTPError as exc:
                             if exc.status != 429 and not 500 <= exc.status <= 599:
                                 raise
@@ -129,11 +130,17 @@ class HTTPClient:
             except TimeoutError as exc:
                 raise FetchError("Request timed out") from exc
 
-    async def _download(self, url, budget):
+    async def _download(self, url, budget, method, data, headers, allowed_host):
         for hop in range(self.max_redirects + 1):
             validate_url(url)
-            async with self._session.get(url, allow_redirects=False) as response:
+            if allowed_host is not None and (urlsplit(url).hostname != allowed_host
+                                             or urlsplit(url).scheme != "https"):
+                raise UnsafeDestination("Unexpected redirect destination")
+            async with self._session.request(method, url, data=data, headers=headers,
+                                             allow_redirects=False) as response:
                 if response.status in (301, 302, 303, 307, 308):
+                    if method != "GET":
+                        raise FetchError("Unexpected POST redirect")
                     location = response.headers.get("Location")
                     if not location or hop == self.max_redirects:
                         raise FetchError("Missing redirect location or too many redirects")

@@ -16,7 +16,7 @@ See [Requirements](REQUIREMENTS.md) and [Architecture](ARCHITECTURE.md).
 
 ## Status
 
-Initial SQLite catalog, checkpoints, Google News/RSS collection and compact normalization. Article reading, retention, MCP tools, packaging and live validation are not implemented yet.
+Initial SQLite catalog, checkpoints, Google News/RSS collection and compact normalization. Batch article reading uses googlenewsdecoder and Trafilatura. Retention, MCP tools, packaging and live validation are not implemented yet.
 
 Install dependencies with `python -m pip install -r requirements.txt`; run tests with `python -m unittest discover -s tests -v`.
 
@@ -24,7 +24,7 @@ Install dependencies with `python -m pip install -r requirements.txt`; run tests
 
 - [google-rss-mcp](https://github.com/ccw7463/google-rss-mcp) — functional reference only, not a fork or dependency.
 - [feedparser](https://github.com/kurtmckee/feedparser) — RSS/Atom parsing candidate.
-- [googlenewsdecoder](https://github.com/SSujitX/google-news-url-decoder) — Google News URL resolution candidate.
-- [Trafilatura](https://github.com/adbar/trafilatura) — article extraction candidate.
+- [googlenewsdecoder](https://github.com/SSujitX/google-news-url-decoder) — Google News URL resolution (pinned protocol helpers).
+- [Trafilatura](https://github.com/adbar/trafilatura) — article extraction.
 
 Independent implementation. Prefer maintained libraries, review their licenses and retain required notices.
