@@ -28,8 +28,8 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             tools = {t.name: t for t in await client.list_tools()}
             self.assertEqual({"list_sources", "get_headlines", "search_news", "read_articles",
                               "ack_headlines", "manage_sources", "manage_groups"}, set(tools))
-            async def call(name, **args):
-                return (await client.call_tool(name, args)).structured_content
+            async def call(tool_name, **args):
+                return (await client.call_tool(tool_name, args)).structured_content
             await call("manage_sources", action="upsert", source_id="reuters", kind="google_news",
                        query="site:reuters.com", name="Reuters")
             await call("manage_groups", action="upsert", group_id="breaking", sources=["reuters"])
